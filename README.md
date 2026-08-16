@@ -4,8 +4,7 @@
 > 适用于 Minecraft 1.20.1 / Forge 47.x / Touhou Little Maid 1.5.3。  
 必要前置：车万女仆(Touhou Little Maid)1.5.3
 
-直接下载  [车万女仆_超时空救援]tlm_beyond_space-forge-1.0.0.jar
-放置到MOD文件夹下就行。
+直接下载  <b>[车万女仆_超时空救援]tlm_beyond_space-forge-1.0.0.jar</b>  放置到MOD文件夹下就行。
 
 ## 1. 这个 Mod 能做什么？
 
