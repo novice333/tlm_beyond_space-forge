@@ -100,8 +100,10 @@ public final class RescueCombatConfigScreen extends AbstractMaidContainerGui<Res
         MaidConfigButton pageSelector = new RescueCombatModeButton(
                 leftPos + 86,
                 topPos + 145,
-                Component.translatable("gui.tlm_beyond_space.rescue_combat_page"),
+                Component.empty(),
                 Component.literal((page + 1) + " / " + pageCount()),
+                0,
+                true,
                 button -> changePage(-1),
                 button -> changePage(1));
         pageSelector.active = pageCount() > 1;
