@@ -1,0 +1,17 @@
+.gradle/
+.idea/
+build/
+run/
+logs/
+release/
+out/
+bin/
+libs/*.jar
+
+*.log
+*.tmp
+hs_err_pid*
+replay_pid*
+
+# Local notes used during manual testing.
+测试.txt

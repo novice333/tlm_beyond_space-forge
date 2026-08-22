@@ -1,0 +1,21 @@
+{
+  "type": "touhou_little_maid:altar_crafting",
+  "output": {
+    "type": "minecraft:item",
+    "nbt": {
+      "Item": {
+        "id": "tlm_beyond_space:spacetime_rescue_charm",
+        "Count": 1
+      }
+    }
+  },
+  "power": 0.1,
+  "ingredients": [
+    {
+      "item": "minecraft:wooden_sword"
+    },
+    {
+      "item": "minecraft:book"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "parent": "item/generated",
+  "textures": {
+    "layer0": "tlm_beyond_space:item/maid_weapon_case"
+  }
+}

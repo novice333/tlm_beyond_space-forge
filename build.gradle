@@ -1,0 +1,116 @@
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+version = '1.0.2'
+group = 'com.github.tlmbeyondspace'
+
+base {
+    archivesName = 'tlm_beyond_space-forge'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            mods {
+                tlm_beyond_space {
+                    source sourceSets.main
+                }
+            }
+        }
+        server {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            mods {
+                tlm_beyond_space {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir {
+        dir 'libs'
+    }
+    maven {
+        name = 'TartaricAcid Maven'
+        url = 'https://maven.tartaricacid.cn/releases'
+    }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.3.0'
+
+    compileOnly fg.deobf('libs:touhoulittlemaid:1.5.3-forge+mc1.20.1')
+    runtimeOnly fg.deobf('libs:touhoulittlemaid:1.5.3-forge+mc1.20.1')
+    testCompileOnly fg.deobf('libs:touhoulittlemaid:1.5.3-forge+mc1.20.1')
+
+    runtimeOnly fg.deobf('libs:touhou_little_maid_combat:2.0.6-forge+mc1.20.1')
+
+    compileOnly fg.deobf('libs:maid_useful_task:1.4.2')
+    runtimeOnly fg.deobf('libs:maid_useful_task:1.4.2')
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
+
+processResources {
+    def replaceProps = [mod_version: project.version]
+    inputs.properties replaceProps
+    filesMatching(['META-INF/mods.toml']) {
+        expand replaceProps
+    }
+}
+
+jar {
+    manifest {
+        attributes([
+                'Specification-Title'     : 'tlm_beyond_space',
+                'Specification-Vendor'    : 'TLM Beyond Space',
+                'Specification-Version'   : '1',
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : 'TLM Beyond Space',
+                'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
+        ])
+    }
+}
+
+jar.finalizedBy('reobfJar')
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            artifact jar
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ['-Xlint:deprecation']
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    maxParallelForks = 1
+    minHeapSize = '64m'
+    maxHeapSize = '256m'
+}
