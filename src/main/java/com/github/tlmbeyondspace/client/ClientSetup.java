@@ -24,6 +24,13 @@ public final class ClientSetup {
         Minecraft.getInstance().setScreen(new DistressRosterScreen(hand, entries, recallMode));
     }
 
+    public static void openDistressRosterScreen(InteractionHand hand, List<MaidRosterEntry> entries,
+                                                boolean recallMode, boolean maidReformAvailable,
+                                                boolean knockdownRescue) {
+        Minecraft.getInstance().setScreen(new DistressRosterScreen(hand, entries, recallMode,
+                maidReformAvailable, knockdownRescue));
+    }
+
     private ClientSetup() {
     }
 }

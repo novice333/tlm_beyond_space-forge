@@ -15,7 +15,7 @@ class MaidRescueSessionDataTest {
                 RescueSessionKind.DISTRESS, new ResourceLocation("example", "mining"),
                 new ResourceLocation("example", "spell_attack"), new ResourceLocation("minecraft", "overworld"),
                 new Vec3(12.5, 64, -3.25), true, MaidSchedule.NIGHT, 1234L, 17, RescueMode.BOND,
-                true, true);
+                true, true, true);
 
         MaidRescueSessionData.Data loaded = MaidRescueSessionData.Data.load(source.save());
 
@@ -32,5 +32,6 @@ class MaidRescueSessionDataTest {
         assertEquals(source.triggerMode(), loaded.triggerMode());
         assertTrue(loaded.sittingCaptured());
         assertTrue(loaded.sourceSitting());
+        assertTrue(loaded.returnPending());
     }
 }

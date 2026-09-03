@@ -1,6 +1,8 @@
 package com.github.tlmbeyondspace.data;
 
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -17,7 +19,7 @@ class DistressSignalDataTest {
         UUID maid = UUID.randomUUID();
         ResourceLocation task = new ResourceLocation("example", "magic_attack");
         DistressSignalData source = new DistressSignalData(owner,
-                Map.of(maid, new DistressSignalData.Selection(true, task)), true);
+                Map.of(maid, new DistressSignalData.Selection(true, task)), true, true);
 
         DistressSignalData loaded = DistressSignalData.load(source.save());
 
@@ -27,6 +29,7 @@ class DistressSignalDataTest {
         assertTrue(loaded.get(maid).enabled());
         assertEquals(task, loaded.get(maid).combatTask());
         assertTrue(loaded.recallMode());
+        assertTrue(loaded.knockdownRescue());
     }
 
     @Test
@@ -43,5 +46,33 @@ class DistressSignalDataTest {
                 new DistressSignalData(null, selections).save());
 
         assertEquals(List.of(first, second), List.copyOf(loaded.selections().keySet()));
+    }
+
+    @Test
+    void loadUnloadedChoiceRoundTrips() {
+        UUID maid = UUID.randomUUID();
+        DistressSignalData source = new DistressSignalData(null, Map.of(maid,
+                new DistressSignalData.Selection(true, false,
+                        new ResourceLocation("example", "attack"))));
+
+        DistressSignalData loaded = DistressSignalData.load(source.save());
+
+        assertTrue(loaded.get(maid).enabled());
+        assertFalse(loaded.get(maid).loadUnloaded());
+    }
+
+    @Test
+    void legacyEnabledSelectionKeepsOldChunkLoadingBehavior() {
+        UUID maid = UUID.randomUUID();
+        CompoundTag root = new CompoundTag();
+        ListTag selections = new ListTag();
+        CompoundTag entry = new CompoundTag();
+        entry.putUUID("Maid", maid);
+        entry.putBoolean("Enabled", true);
+        entry.putString("CombatTask", "example:attack");
+        selections.add(entry);
+        root.put("Selections", selections);
+
+        assertTrue(DistressSignalData.load(root).get(maid).loadUnloaded());
     }
 }

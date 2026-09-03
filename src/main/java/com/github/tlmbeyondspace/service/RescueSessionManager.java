@@ -22,13 +22,21 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class RescueSessionManager {
     public static final RescueSessionManager INSTANCE = new RescueSessionManager();
+    private static final int MAX_BLOCKING_RETURN_RETRY_TICKS = 100;
     private final Map<UUID, Long> failureCooldowns = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> returnFailureSince = new ConcurrentHashMap<>();
 
     public void tick(EntityMaid maid) {
         if (!(maid.level() instanceof ServerLevel) || !maid.isAlive()) {
             return;
         }
         MaidRescueSessionData.Data session = MaidRescueSessionData.get(maid);
+        if (session.returnPending()) {
+            if (maid.tickCount % 20 == Math.floorMod(maid.getId(), 20)) {
+                DistressCrossDimSupport.finishAndReturn(maid, session);
+            }
+            return;
+        }
         if (session.active()) {
             tickActive(maid, session);
             return;
@@ -44,6 +52,10 @@ public final class RescueSessionManager {
 
     private void tickReady(EntityMaid maid) {
         if (PromaidCompat.shouldPrioritizeSelfPreservation(maid)) {
+            return;
+        }
+        LivingEntity currentOwner = maid.getOwner();
+        if (currentOwner != null && !currentOwner.isAlive()) {
             return;
         }
         MaidRescueProfileData.Data binding = MaidRescueProfileData.get(maid);
@@ -68,7 +80,7 @@ public final class RescueSessionManager {
         if (mode == RescueMode.FORBIDDEN) {
             return;
         }
-        Optional<LivingEntity> owner = Optional.ofNullable(maid.getOwner());
+        Optional<LivingEntity> owner = Optional.ofNullable(currentOwner);
         Optional<LivingEntity> trigger = findTrigger(maid, owner, mode);
         trigger.ifPresent(target -> startRegular(maid, target, mode));
     }
@@ -98,20 +110,36 @@ public final class RescueSessionManager {
         if (PromaidCompat.shouldPrioritizeSelfPreservation(maid)) {
             return false;
         }
+        LivingEntity owner = maid.getOwner();
+        if (owner != null && !owner.isAlive()) {
+            return false;
+        }
         return RegularRescueSupport.startRegular(this, maid, target, mode);
     }
 
     public boolean startDistress(EntityMaid maid, IMaidTask combatTask, Optional<LivingEntity> target,
                                  Vec3 summonPosition) {
+        return startDistress(maid, combatTask, target, summonPosition, true);
+    }
+
+    public boolean startDistress(EntityMaid maid, IMaidTask combatTask, Optional<LivingEntity> target,
+                                 Vec3 summonPosition, boolean transportMaid) {
+        return startDistressDetailed(maid, combatTask, target, summonPosition, transportMaid)
+                == DistressStartResult.SUCCESS;
+    }
+
+    public DistressStartResult startDistressDetailed(EntityMaid maid, IMaidTask combatTask,
+                                                      Optional<LivingEntity> target,
+                                                      Vec3 summonPosition, boolean transportMaid) {
         if (PromaidCompat.shouldPrioritizeSelfPreservation(maid)
                 || !RescueTaskClassifier.isCombatTask(combatTask)
                 || MaidRescueSessionData.get(maid).active()) {
-            return false;
+            return DistressStartResult.PRECONDITION_FAILED;
         }
         IMaidTask sourceTask = maid.getTask();
         if (sourceTask == null) {
             applyFailureCooldown(maid);
-            return false;
+            return DistressStartResult.SOURCE_TASK_MISSING;
         }
         boolean sourceSitting = maid.isMaidInSittingPose();
         MaidRescueSessionData.Data session = new MaidRescueSessionData.Data(true,
@@ -129,25 +157,43 @@ public final class RescueSessionManager {
                 DistressCrossDimSupport.restoreSourceSitting(maid, session);
                 MaidRescueSessionData.clear(maid);
                 applyFailureCooldown(maid);
-                return false;
+                return DistressStartResult.SITTING_RELEASE_FAILED;
             }
         }
         WeaponCaseSwapService.beginSwap(maid, combatTask);
-        if (!TaskSwitchService.prepareAndSwitch(maid, combatTask)) {
+        TaskSwitchService.SwitchResult switchResult = TaskSwitchService.prepareAndSwitchDetailed(maid, combatTask);
+        if (switchResult != TaskSwitchService.SwitchResult.SUCCESS) {
             WeaponCaseSwapService.restoreIfActive(maid);
             DistressCrossDimSupport.restoreSourceSitting(maid, session);
             MaidRescueSessionData.clear(maid);
             applyFailureCooldown(maid);
-            return false;
+            return switch (switchResult) {
+                case MISSING_REQUIRED_ITEM -> DistressStartResult.MISSING_REQUIRED_ITEM;
+                case REJECTED -> DistressStartResult.TASK_SWITCH_REJECTED;
+                case ERROR -> DistressStartResult.TASK_SWITCH_ERROR;
+                default -> DistressStartResult.TASK_SWITCH_ERROR;
+            };
         }
-        SafeTeleportService.teleportTo(maid, summonPosition);
+        if (transportMaid) {
+            SafeTeleportService.teleportTo(maid, summonPosition);
+        }
         target.filter(LivingEntity::isAlive)
                 .filter(entity -> entity.level() == maid.level() && !maid.isAlliedTo(entity))
                 .ifPresent(entity -> {
                     maid.getBrain().setMemory(MemoryModuleType.ATTACK_TARGET, entity);
                     maid.setTarget(entity);
                 });
-        return true;
+        return DistressStartResult.SUCCESS;
+    }
+
+    public enum DistressStartResult {
+        SUCCESS,
+        PRECONDITION_FAILED,
+        SOURCE_TASK_MISSING,
+        SITTING_RELEASE_FAILED,
+        MISSING_REQUIRED_ITEM,
+        TASK_SWITCH_REJECTED,
+        TASK_SWITCH_ERROR
     }
 
     private void tickActive(EntityMaid maid, MaidRescueSessionData.Data session) {
@@ -192,11 +238,34 @@ public final class RescueSessionManager {
 
     public FinishResult finishAndReturnResult(EntityMaid maid, MaidRescueSessionData.Data session) {
         if (!isSessionCombatTask(maid, session)) {
+            returnFailureSince.remove(maid.getUUID());
             DistressCrossDimSupport.restoreAfterExternalTaskChange(maid, session);
             return FinishResult.EXTERNAL_TASK_ENDED;
         }
-        return DistressCrossDimSupport.finishAndReturn(maid, session)
-                ? FinishResult.RETURNED : FinishResult.FAILED;
+        if (DistressCrossDimSupport.finishAndReturn(maid, session)) {
+            returnFailureSince.remove(maid.getUUID());
+            return FinishResult.RETURNED;
+        }
+        long now = maid.level().getGameTime();
+        long firstFailure = returnFailureSince.computeIfAbsent(maid.getUUID(), ignored -> now);
+        if (now - firstFailure >= MAX_BLOCKING_RETURN_RETRY_TICKS
+                && maid.level() instanceof ServerLevel level) {
+            PendingMaidReturnService.defer(level.getServer(), maid, session);
+            DistressCrossDimSupport.restoreForPendingReturn(maid, session);
+            returnFailureSince.remove(maid.getUUID());
+            return FinishResult.DEFERRED;
+        }
+        return FinishResult.FAILED;
+    }
+
+    public void finishImmediatelyWhenOwnerUnavailable(EntityMaid maid,
+                                                       MaidRescueSessionData.Data session) {
+        FinishResult result = finishAndReturnResult(maid, session);
+        if (result == FinishResult.FAILED && maid.level() instanceof ServerLevel level) {
+            PendingMaidReturnService.defer(level.getServer(), maid, session);
+            DistressCrossDimSupport.restoreForPendingReturn(maid, session);
+            returnFailureSince.remove(maid.getUUID());
+        }
     }
 
     private boolean isSessionCombatTask(EntityMaid maid, MaidRescueSessionData.Data session) {
@@ -210,6 +279,11 @@ public final class RescueSessionManager {
                     maid.getUUID(), error);
             return false;
         }
+    }
+
+    public boolean isLiveRescueSession(EntityMaid maid, MaidRescueSessionData.Data session) {
+        return session.active() && session.originDimension() != null && session.sourceTask() != null
+                && session.combatTask() != null && isSessionCombatTask(maid, session);
     }
 
     public void clearBindingSafely(EntityMaid maid) {
@@ -227,6 +301,7 @@ public final class RescueSessionManager {
 
     public void clearCaches() {
         failureCooldowns.clear();
+        returnFailureSince.clear();
     }
 
     private RescueSessionManager() {
@@ -235,6 +310,7 @@ public final class RescueSessionManager {
     public enum FinishResult {
         RETURNED,
         EXTERNAL_TASK_ENDED,
+        DEFERRED,
         FAILED
     }
 }

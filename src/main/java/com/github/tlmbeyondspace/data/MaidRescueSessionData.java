@@ -43,24 +43,46 @@ public final class MaidRescueSessionData {
                        ResourceLocation combatTask, ResourceLocation originDimension, Vec3 origin,
                        boolean sourceHomeMode, MaidSchedule sourceSchedule, long startedAt,
                        int quietTicks, RescueMode triggerMode, boolean sittingCaptured,
-                       boolean sourceSitting) {
+                       boolean sourceSitting, boolean returnPending) {
         public Data(boolean active, RescueSessionKind kind, ResourceLocation sourceTask,
                     ResourceLocation combatTask, ResourceLocation originDimension, Vec3 origin,
                     boolean sourceHomeMode, MaidSchedule sourceSchedule, long startedAt,
                     int quietTicks, RescueMode triggerMode) {
             this(active, kind, sourceTask, combatTask, originDimension, origin, sourceHomeMode,
-                    sourceSchedule, startedAt, quietTicks, triggerMode, false, false);
+                    sourceSchedule, startedAt, quietTicks, triggerMode, false, false,
+                    false);
+        }
+
+        public Data(boolean active, RescueSessionKind kind, ResourceLocation sourceTask,
+                    ResourceLocation combatTask, ResourceLocation originDimension, Vec3 origin,
+                    boolean sourceHomeMode, MaidSchedule sourceSchedule, long startedAt,
+                    int quietTicks, RescueMode triggerMode, boolean sittingCaptured,
+                    boolean sourceSitting) {
+            this(active, kind, sourceTask, combatTask, originDimension, origin, sourceHomeMode,
+                    sourceSchedule, startedAt, quietTicks, triggerMode, sittingCaptured,
+                    sourceSitting, false);
         }
 
         public static Data empty() {
             return new Data(false, RescueSessionKind.REGULAR, null, null, null, Vec3.ZERO,
-                    false, MaidSchedule.ALL, 0L, 0, RescueMode.FORBIDDEN, false, false);
+                    false, MaidSchedule.ALL, 0L, 0, RescueMode.FORBIDDEN, false, false,
+                    false);
         }
 
         public Data withQuietTicks(int value) {
             return new Data(active, kind, sourceTask, combatTask, originDimension, origin,
                     sourceHomeMode, sourceSchedule, startedAt, value, triggerMode,
-                    sittingCaptured, sourceSitting);
+                    sittingCaptured, sourceSitting, returnPending);
+        }
+
+        public Data asReturnPending() {
+            return new Data(false, kind, sourceTask, combatTask, originDimension, origin,
+                    sourceHomeMode, sourceSchedule, startedAt, quietTicks, triggerMode,
+                    sittingCaptured, sourceSitting, true);
+        }
+
+        public boolean recoveryTracked() {
+            return active || returnPending;
         }
 
         public CompoundTag save() {
@@ -80,6 +102,7 @@ public final class MaidRescueSessionData {
             tag.putString("TriggerMode", triggerMode.name());
             tag.putBoolean("SittingCaptured", sittingCaptured);
             tag.putBoolean("SourceSitting", sourceSitting);
+            tag.putBoolean("ReturnPending", returnPending);
             return tag;
         }
 
@@ -95,7 +118,8 @@ public final class MaidRescueSessionData {
                     tag.getBoolean("SourceHomeMode"), schedule, tag.getLong("StartedAt"),
                     Math.max(0, tag.getInt("QuietTicks")),
                     parseEnum(RescueMode.class, tag.getString("TriggerMode"), RescueMode.BOND),
-                    tag.getBoolean("SittingCaptured"), tag.getBoolean("SourceSitting"));
+                    tag.getBoolean("SittingCaptured"), tag.getBoolean("SourceSitting"),
+                    tag.getBoolean("ReturnPending"));
         }
 
         private static <E extends Enum<E>> E parseEnum(Class<E> type, String value, E fallback) {

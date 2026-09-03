@@ -7,10 +7,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
 
 public final class DistressThreatService {
+    static final int ABSOLUTE_MINIMUM_ACTIVE_TICKS = 400;
+
     public static void tick(EntityMaid maid, MaidRescueSessionData.Data session) {
         LivingEntity owner = maid.getOwner();
         if (!(owner instanceof ServerPlayer player) || !player.isAlive() || player.level() != maid.level()) {
-            RescueSessionManager.INSTANCE.finishAndReturn(maid, session);
+            RescueSessionManager.INSTANCE.finishImmediatelyWhenOwnerUnavailable(maid, session);
             return;
         }
 
@@ -39,8 +41,9 @@ public final class DistressThreatService {
         MaidRescueSessionData.Data updated = session.withQuietTicks(quietTicks);
         MaidRescueSessionData.set(maid, updated);
         long elapsed = maid.level().getGameTime() - session.startedAt();
-        int minimum = BeyondSpaceCommonConfig.SIGNAL_MIN_ACTIVE_TICKS.get();
-        int maximum = BeyondSpaceCommonConfig.SIGNAL_MAX_ACTIVE_TICKS.get();
+        int minimum = Math.max(ABSOLUTE_MINIMUM_ACTIVE_TICKS,
+                BeyondSpaceCommonConfig.SIGNAL_MIN_ACTIVE_TICKS.get());
+        int maximum = Math.max(minimum, BeyondSpaceCommonConfig.SIGNAL_MAX_ACTIVE_TICKS.get());
         int quietRequired = BeyondSpaceCommonConfig.SIGNAL_QUIET_TICKS.get();
         if (elapsed >= maximum || (elapsed >= minimum && quietTicks >= quietRequired)) {
             RescueSessionManager.INSTANCE.finishAndReturn(maid, updated);

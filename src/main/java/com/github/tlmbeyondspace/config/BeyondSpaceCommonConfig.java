@@ -17,8 +17,8 @@ public final class BeyondSpaceCommonConfig {
     public static final ForgeConfigSpec.IntValue SIGNAL_MAX_ACTIVE_TICKS;
     public static final ForgeConfigSpec.IntValue MAX_SIGNAL_HELPERS;
     public static final ForgeConfigSpec.BooleanValue PROMAID_AUTO_DISABLE_DIMENSION_FOLLOW;
+    public static final ForgeConfigSpec.BooleanValue PROMAID_AUTO_DISABLE_OWNER_DEATH_TELEPORT;
     public static final ForgeConfigSpec.BooleanValue PROMAID_LOW_HEALTH_PRIORITY;
-    public static final ForgeConfigSpec.BooleanValue PROMAID_OWNER_DEATH_HANDOFF;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -40,12 +40,13 @@ public final class BeyondSpaceCommonConfig {
         builder.push("distressSignal");
         SIGNAL_COOLDOWN_TICKS = builder.comment("Cooldown after using a distress signal.")
                 .defineInRange("cooldownTicks", 100, 1, 12000);
-        SIGNAL_MIN_ACTIVE_TICKS = builder.comment("Minimum duration of a distress rescue, even if no threat is found.")
-                .defineInRange("minimumActiveTicks", 100, 0, 12000);
+        SIGNAL_MIN_ACTIVE_TICKS = builder.comment(
+                        "Minimum duration of a distress rescue, even if no threat is found (400 ticks = 20 seconds).")
+                .defineInRange("minimumActiveTicks", 400, 400, 12000);
         SIGNAL_QUIET_TICKS = builder.comment("Continuous safe ticks required before a distress rescue returns.")
                 .defineInRange("quietTicks", 100, 1, 1200);
         SIGNAL_MAX_ACTIVE_TICKS = builder.comment("Maximum duration of one distress rescue.")
-                .defineInRange("maximumActiveTicks", 6000, 20, 72000);
+                .defineInRange("maximumActiveTicks", 6000, 400, 72000);
         MAX_SIGNAL_HELPERS = builder.comment("Maximum loaded maids summoned by one signal.")
                 .defineInRange("maxHelpers", 20, 1, 20);
         builder.pop();
@@ -56,12 +57,15 @@ public final class BeyondSpaceCommonConfig {
                         "When Promaid is installed, disable its dimension-follow switch in memory at server startup.",
                         "This mod does not save Promaid's config file or require Promaid as a dependency.")
                 .define("autoDisableDimensionFollow", true);
+        PROMAID_AUTO_DISABLE_OWNER_DEATH_TELEPORT = builder.comment(
+                        "When Promaid is installed, disable its owner-death maid teleport in memory at server startup.",
+                        "Beyond Space performs its own origin return before respawn; two death handlers can otherwise",
+                        "move a maid again and turn the death dimension into a false rescue origin.",
+                        "This mod does not save Promaid's config file or require Promaid as a dependency.")
+                .define("autoDisableOwnerDeathTeleport", true);
         PROMAID_LOW_HEALTH_PRIORITY = builder.comment(
                         "Let Promaid self-preservation interrupt or reject Beyond Space rescue sessions.")
                 .define("lowHealthPriority", true);
-        PROMAID_OWNER_DEATH_HANDOFF = builder.comment(
-                        "When Promaid's owner-death teleport is enabled, only release distress state and let Promaid teleport.")
-                .define("ownerDeathHandoff", true);
         builder.pop();
         builder.pop();
 

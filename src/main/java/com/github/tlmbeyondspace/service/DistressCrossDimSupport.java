@@ -22,6 +22,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -33,6 +34,7 @@ import java.util.UUID;
 
 public final class DistressCrossDimSupport {
     private static final int MAX_DETAIL_LINES = 8;
+    private static final String UNCOMMITTED_TRANSFER_TAG = "tlm_beyond_space_uncommitted_transfer";
 
     public static void activate(ServerPlayer player, InteractionHand hand, ItemStack signal) {
         if (player.getCooldowns().isOnCooldown(signal.getItem())) {
@@ -44,11 +46,43 @@ public final class DistressCrossDimSupport {
             return;
         }
         if (data.ownerId().isEmpty()) {
-            data = new DistressSignalData(player.getUUID(), data.selections(), data.recallMode());
+            data = new DistressSignalData(player.getUUID(), data.selections(), data.recallMode(),
+                    data.knockdownRescue());
             DistressSignalData.writeItem(signal, data);
         }
 
         int successLimit = Math.min(Math.max(1, BeyondSpaceCommonConfig.MAX_SIGNAL_HELPERS.get()), 20);
+        if (MaidChunkLoadService.prepare(player, signal.getItem(), data, successLimit,
+                MaidChunkLoadService.ActivationKind.MANUAL)) {
+            return;
+        }
+        activatePrepared(player, signal.getItem(), data, successLimit,
+                MaidChunkLoadService.ActivationKind.MANUAL, Map.of());
+    }
+
+    public static void activateForKnockdown(ServerPlayer player, ItemStack signal) {
+        if (player.getCooldowns().isOnCooldown(signal.getItem())) {
+            return;
+        }
+        DistressSignalData data = DistressSignalData.fromItem(signal);
+        if (!data.knockdownRescue() || !data.canUse(player.getUUID())) {
+            return;
+        }
+        if (data.ownerId().isEmpty()) {
+            data = new DistressSignalData(player.getUUID(), data.selections(), data.recallMode(), true);
+            DistressSignalData.writeItem(signal, data);
+        }
+        if (MaidChunkLoadService.prepare(player, signal.getItem(), data, 1,
+                MaidChunkLoadService.ActivationKind.MAID_REFORM_KNOCKDOWN)) {
+            return;
+        }
+        activatePrepared(player, signal.getItem(), data, 1,
+                MaidChunkLoadService.ActivationKind.MAID_REFORM_KNOCKDOWN, Map.of());
+    }
+
+    static void activatePrepared(ServerPlayer player, Item signalItem, DistressSignalData data,
+                                 int successLimit, MaidChunkLoadService.ActivationKind activationKind,
+                                 Map<UUID, MaidChunkLoadService.LoadFailure> loadFailures) {
         List<Map.Entry<UUID, DistressSignalData.Selection>> selected = data.selections().entrySet().stream()
                 .filter(entry -> entry.getValue().enabled())
                 .toList();
@@ -57,16 +91,23 @@ public final class DistressCrossDimSupport {
         ServerLevel destinationLevel = player.serverLevel();
         MinecraftServer server = player.server;
         int successCount = 0;
+        int recoveredCount = 0;
         List<SkipEntry> failures = new ArrayList<>();
 
         for (int selectionIndex = 0;
              selectionIndex < selected.size() && successCount < successLimit;
              selectionIndex++) {
             UUID maidId = selected.get(selectionIndex).getKey();
+            DistressSignalData.Selection selection = selected.get(selectionIndex).getValue();
             String maidName = names.getOrDefault(maidId, shortUnknownName(maidId));
             Optional<EntityMaid> loaded = MaidRosterService.findLoadedMaid(server, maidId);
             if (loaded.isEmpty()) {
-                failures.add(new SkipEntry(maidName, SkipReason.NOT_LOADED));
+                SkipReason reason = SoulSpellMaidService.isStored(player, maidId)
+                        ? SkipReason.STORED_IN_SOUL_SPELL
+                        : !selection.loadUnloaded()
+                        ? SkipReason.CHUNK_LOADING_DISABLED
+                        : skipReasonForLoad(loadFailures.get(maidId));
+                failures.add(new SkipEntry(maidName, reason));
                 continue;
             }
 
@@ -76,9 +117,34 @@ public final class DistressCrossDimSupport {
                 failures.add(new SkipEntry(maidName, SkipReason.NOT_OWNER));
                 continue;
             }
-            if (MaidRescueSessionData.get(oldMaid).active()) {
-                failures.add(new SkipEntry(maidName, SkipReason.ACTIVE_SESSION));
+            MaidRescueSessionData.Data existingSession = MaidRescueSessionData.get(oldMaid);
+            if (existingSession.returnPending()) {
+                if (finishAndReturn(oldMaid, existingSession)) {
+                    recoveredCount++;
+                    player.displayClientMessage(Component.translatable(
+                            "message.tlm_beyond_space.signal_recovered_origin", maidName), false);
+                } else {
+                    failures.add(new SkipEntry(maidName, SkipReason.RETURN_PENDING));
+                }
                 continue;
+            }
+            if (existingSession.active()) {
+                if (RescueSessionManager.INSTANCE.isLiveRescueSession(oldMaid, existingSession)) {
+                    if (existingSession.kind() == RescueSessionKind.DISTRESS) {
+                        if (finishAndReturn(oldMaid, existingSession)) {
+                            recoveredCount++;
+                            player.displayClientMessage(Component.translatable(
+                                    "message.tlm_beyond_space.signal_recovered_origin", maidName), false);
+                        } else {
+                            restoreForPendingReturn(oldMaid, existingSession);
+                            failures.add(new SkipEntry(maidName, SkipReason.RETURN_PENDING));
+                        }
+                        continue;
+                    }
+                    failures.add(new SkipEntry(maidName, SkipReason.ACTIVE_SESSION));
+                    continue;
+                }
+                restoreAfterExternalTaskChange(oldMaid, existingSession);
             }
             if (PromaidCompat.shouldPrioritizeSelfPreservation(oldMaid)) {
                 failures.add(new SkipEntry(maidName, SkipReason.SELF_PRESERVING));
@@ -90,27 +156,41 @@ public final class DistressCrossDimSupport {
                 continue;
             }
 
-            Vec3 preferred = summonPoint(player.position(), successCount, successLimit);
-            Optional<Vec3> safePosition = SafeTeleportService.findSafePosition(destinationLevel, preferred, 3, oldMaid);
-            if (safePosition.isEmpty()) {
-                failures.add(new SkipEntry(maidName, SkipReason.NO_SAFE_POSITION));
+            boolean sameDimension = oldMaid.level() == destinationLevel;
+            boolean preserveMounted = activationKind == MaidChunkLoadService.ActivationKind.MAID_REFORM_KNOCKDOWN
+                    && oldMaid.isPassenger();
+            if (preserveMounted && !sameDimension) {
+                failures.add(new SkipEntry(maidName, SkipReason.MOUNTED_CROSS_DIMENSION));
                 continue;
             }
 
-            boolean sameDimension = oldMaid.level() == destinationLevel;
+            Optional<Vec3> safePosition;
+            if (preserveMounted) {
+                safePosition = Optional.of(oldMaid.position());
+            } else {
+                Vec3 preferred = summonPoint(player.position(), successCount, successLimit);
+                SafeTeleportService.SearchResult safeSearch = SafeTeleportService.findSafePositionResult(
+                        destinationLevel, preferred, 3, oldMaid);
+                safePosition = safeSearch.position();
+                if (safePosition.isEmpty()) {
+                    failures.add(new SkipEntry(maidName, skipReasonForSafeSearch(safeSearch.failureReason())));
+                    continue;
+                }
+            }
+
             Vec3 initialPosition = sameDimension ? safePosition.get() : oldMaid.position();
             Optional<LivingEntity> initialTarget = sameDimension ? priorityTarget : Optional.empty();
-            boolean started;
+            RescueSessionManager.DistressStartResult startResult;
             try {
-                started = RescueSessionManager.INSTANCE.startDistress(
-                        oldMaid, combatTask, initialTarget, initialPosition);
+                startResult = RescueSessionManager.INSTANCE.startDistressDetailed(
+                        oldMaid, combatTask, initialTarget, initialPosition, !preserveMounted);
             } catch (Exception | LinkageError error) {
                 TlmBeyondSpace.LOGGER.warn("DISTRESS start failed for maid {}", oldMaid.getUUID(), error);
                 rollbackFailedStart(oldMaid);
-                started = false;
+                startResult = RescueSessionManager.DistressStartResult.TASK_SWITCH_ERROR;
             }
-            if (!started) {
-                failures.add(new SkipEntry(maidName, SkipReason.TASK_SWITCH_FAILED));
+            if (startResult != RescueSessionManager.DistressStartResult.SUCCESS) {
+                failures.add(new SkipEntry(maidName, skipReasonForStart(startResult)));
                 continue;
             }
             if (sameDimension) {
@@ -133,10 +213,12 @@ public final class DistressCrossDimSupport {
         }
 
         if (successCount > 0) {
-            player.getCooldowns().addCooldown(signal.getItem(), BeyondSpaceCommonConfig.SIGNAL_COOLDOWN_TICKS.get());
+            player.getCooldowns().addCooldown(signalItem, BeyondSpaceCommonConfig.SIGNAL_COOLDOWN_TICKS.get());
         }
-        player.displayClientMessage(Component.translatable("message.tlm_beyond_space.signal_result",
-                successCount, failures.size()), true);
+        if (successCount > 0 || !failures.isEmpty() || recoveredCount == 0) {
+            player.displayClientMessage(Component.translatable("message.tlm_beyond_space.signal_result",
+                    successCount, failures.size()), true);
+        }
         sendSkipDetails(player, failures);
     }
 
@@ -149,8 +231,9 @@ public final class DistressCrossDimSupport {
 
     private static boolean finishRegular(EntityMaid maid, MaidRescueSessionData.Data session) {
         boolean followedOwnerBeforeRescue = RegularRescueSupport.shouldStayNearOwnerAfterRescue(session);
-        if (!followedOwnerBeforeRescue && !SafeTeleportService.returnToOrigin(maid, session)) {
-            TlmBeyondSpace.LOGGER.warn("Could not find a safe rescue return position for maid {} at {}",
+        boolean mounted = RegularRescueSupport.shouldSkipAutomaticReturnTeleport(maid);
+        if (!followedOwnerBeforeRescue && !mounted && !SafeTeleportService.returnToOrigin(maid, session)) {
+            TlmBeyondSpace.LOGGER.debug("Could not find a safe rescue return position for maid {} at {}",
                     maid.getUUID(), session.origin());
             return false;
         }
@@ -159,6 +242,12 @@ public final class DistressCrossDimSupport {
     }
 
     private static boolean finishDistressAndReturn(EntityMaid maid, MaidRescueSessionData.Data session) {
+        // A mounted maid may have entered an automatic combat session without being transported.
+        // Ending that session must not pull her off the broom merely to reapply the same position.
+        if (maid.isPassenger()) {
+            restoreTemporaryState(maid, session, true);
+            return true;
+        }
         if (!(maid.level() instanceof ServerLevel sourceLevel) || session.originDimension() == null) {
             return false;
         }
@@ -168,28 +257,35 @@ public final class DistressCrossDimSupport {
                     session.originDimension(), maid.getUUID());
             return false;
         }
-        Optional<Vec3> safeOrigin = SafeTeleportService.findSafeReturnPosition(originLevel, session.origin(),
-                BeyondSpaceCommonConfig.SAFE_RETURN_RADIUS.get(), maid);
-        if (safeOrigin.isEmpty()) {
-            return false;
-        }
-
-        EntityMaid returnedMaid;
-        if (sourceLevel == originLevel) {
-            SafeTeleportService.teleportTo(maid, safeOrigin.get());
-            returnedMaid = maid;
-        } else {
-            TransferOutcome transfer = transferMaid(maid, originLevel, safeOrigin.get());
-            if (!transfer.success()) {
-                TlmBeyondSpace.LOGGER.warn("Could not cross-dimension return distress maid {}: {}",
-                        maid.getUUID(), transfer.status());
+        try (SafeTeleportService.ReturnAreaLease ignored = SafeTeleportService.openReturnArea(
+                originLevel, session.origin(), BeyondSpaceCommonConfig.SAFE_RETURN_RADIUS.get())) {
+            Optional<Vec3> safeOrigin = SafeTeleportService.findSafePositionResult(originLevel, session.origin(),
+                    BeyondSpaceCommonConfig.SAFE_RETURN_RADIUS.get(), maid).position();
+            if (safeOrigin.isEmpty()) {
                 return false;
             }
-            returnedMaid = transfer.maid();
-        }
 
-        restoreTemporaryState(returnedMaid, session, true);
-        return true;
+            EntityMaid returnedMaid;
+            if (sourceLevel == originLevel) {
+                SafeTeleportService.teleportTo(maid, safeOrigin.get());
+                returnedMaid = maid;
+            } else {
+                TransferOutcome transfer = transferMaid(maid, originLevel, safeOrigin.get());
+                if (!transfer.success()) {
+                    TlmBeyondSpace.LOGGER.debug("Could not cross-dimension return distress maid {}: {}",
+                            maid.getUUID(), transfer.status());
+                    return false;
+                }
+                returnedMaid = transfer.maid();
+            }
+
+            restoreTemporaryState(returnedMaid, session, true);
+            return true;
+        } catch (Exception | LinkageError error) {
+            TlmBeyondSpace.LOGGER.warn("Could not hold distress return chunks for maid {} in {} near {}",
+                    maid.getUUID(), originLevel.dimension().location(), session.origin(), error);
+            return false;
+        }
     }
 
     private static void restoreTemporaryState(EntityMaid maid, MaidRescueSessionData.Data session,
@@ -210,10 +306,21 @@ public final class DistressCrossDimSupport {
         }
         MaidRescueSessionData.clear(maid);
         DamageSignalService.clearVictim(maid.getUUID());
+        MaidRosterService.observeImmediately(maid);
     }
 
-    static void restoreWithoutReturn(EntityMaid maid, MaidRescueSessionData.Data session) {
-        restoreTemporaryState(maid, session, true);
+    static void restoreForPendingReturn(EntityMaid maid, MaidRescueSessionData.Data session) {
+        try {
+            WeaponCaseSwapService.restoreIfActive(maid);
+        } catch (Exception | LinkageError error) {
+            TlmBeyondSpace.LOGGER.warn("Could not restore weapon before deferred return for maid {}",
+                    maid.getUUID(), error);
+        }
+        TaskSwitchService.restore(maid, session, true);
+        restoreSourceSitting(maid, session);
+        MaidRescueSessionData.set(maid, session.asReturnPending());
+        DamageSignalService.clearVictim(maid.getUUID());
+        MaidRosterService.observeImmediately(maid);
     }
 
     static void releaseForSelfPreservation(EntityMaid maid, MaidRescueSessionData.Data session) {
@@ -235,7 +342,7 @@ public final class DistressCrossDimSupport {
     }
 
     static void restoreSourceSitting(EntityMaid maid, MaidRescueSessionData.Data session) {
-        if (session.kind() != RescueSessionKind.DISTRESS || !session.sittingCaptured()) {
+        if (!session.sittingCaptured()) {
             return;
         }
         try {
@@ -271,6 +378,7 @@ public final class DistressCrossDimSupport {
 
             stage = TransferStage.RESTORE;
             candidateMaid.restoreFrom(oldMaid);
+            candidateMaid.getPersistentData().putBoolean(UNCOMMITTED_TRANSFER_TAG, true);
             MaidRescueSessionData.Data currentSession = MaidRescueSessionData.get(oldMaid);
             MaidRescueSessionData.set(candidateMaid, currentSession);
 
@@ -283,15 +391,18 @@ public final class DistressCrossDimSupport {
             candidateMaid.setDeltaMovement(Vec3.ZERO);
 
             stage = TransferStage.ADD_DESTINATION;
-            destination.addDuringTeleport(candidateMaid);
+            boolean addedToDestination = destination.addWithUUID(candidateMaid);
 
             stage = TransferStage.VERIFY_DESTINATION;
-            Entity resolved = destination.getEntity(maidId);
-            boolean candidateValid = resolved == candidateMaid
+            boolean candidateValid = addedToDestination && candidateMaid.isAddedToWorld()
                     && candidateMaid.level() == destination
                     && !candidateMaid.isRemoved()
                     && maidId.equals(candidateMaid.getUUID());
             if (!candidateValid) {
+                TlmBeyondSpace.LOGGER.warn(
+                        "DISTRESS destination rejected maid {} in {} added={} addedToWorld={} removed={}",
+                        maidId, destination.dimension().location(), addedToDestination,
+                        candidateMaid.isAddedToWorld(), candidateMaid.isRemoved());
                 boolean cleaned = discardCandidate(candidateMaid);
                 return TransferOutcome.failed(cleaned
                         ? TransferStatus.ENTITY_VERIFY_FAILED : TransferStatus.PARTIAL_TRANSFER, true);
@@ -299,11 +410,13 @@ public final class DistressCrossDimSupport {
 
             stage = TransferStage.VERIFY_SESSION;
             MaidRescueSessionData.Data candidateSession = MaidRescueSessionData.get(candidateMaid);
-            if (!candidateSession.active() || candidateSession.kind() != RescueSessionKind.DISTRESS) {
+            if (!candidateSession.recoveryTracked()
+                    || candidateSession.kind() != RescueSessionKind.DISTRESS) {
                 MaidRescueSessionData.set(candidateMaid, currentSession);
                 candidateSession = MaidRescueSessionData.get(candidateMaid);
             }
-            if (!candidateSession.active() || candidateSession.kind() != RescueSessionKind.DISTRESS) {
+            if (!candidateSession.recoveryTracked()
+                    || candidateSession.kind() != RescueSessionKind.DISTRESS) {
                 boolean cleaned = discardCandidate(candidateMaid);
                 return TransferOutcome.failed(cleaned
                         ? TransferStatus.ENTITY_VERIFY_FAILED : TransferStatus.PARTIAL_TRANSFER, true);
@@ -319,8 +432,11 @@ public final class DistressCrossDimSupport {
             }
 
             stage = TransferStage.COMMIT;
-            clearMaidWorldInfo(source, oldMaid);
+            // MaidWorldData is stored globally in the overworld. Source removal temporarily writes
+            // the old position; one UUID removal is sufficient while the destination entity is loaded.
             clearMaidWorldInfo(destination, candidateMaid);
+            candidateMaid.getPersistentData().remove(UNCOMMITTED_TRANSFER_TAG);
+            MaidRosterService.observeImmediately(candidateMaid);
             EntityMaid movedMaid = candidateMaid;
             return TransferOutcome.success(movedMaid);
         } catch (Exception | LinkageError error) {
@@ -329,8 +445,9 @@ public final class DistressCrossDimSupport {
                     maidId, source.dimension().location(), destination.dimension().location(), stage, error);
             if (oldMaid.isRemoved() && candidateMaid != null && !candidateMaid.isRemoved()
                     && candidateMaid.level() == destination && maidId.equals(candidateMaid.getUUID())) {
-                clearMaidWorldInfo(source, oldMaid);
                 clearMaidWorldInfo(destination, candidateMaid);
+                candidateMaid.getPersistentData().remove(UNCOMMITTED_TRANSFER_TAG);
+                MaidRosterService.observeImmediately(candidateMaid);
                 return TransferOutcome.success(candidateMaid);
             }
             boolean cleaned = discardCandidate(candidateMaid);
@@ -352,6 +469,10 @@ public final class DistressCrossDimSupport {
                     candidateMaid.getUUID(), error);
         }
         return candidateMaid.isRemoved();
+    }
+
+    static boolean isUncommittedTransfer(EntityMaid maid) {
+        return maid.getPersistentData().getBoolean(UNCOMMITTED_TRANSFER_TAG);
     }
 
     private static void clearMaidWorldInfo(ServerLevel level, EntityMaid maid) {
@@ -491,14 +612,59 @@ public final class DistressCrossDimSupport {
         };
     }
 
+    private static SkipReason skipReasonForSafeSearch(SafeTeleportService.FailureReason reason) {
+        return switch (reason) {
+            case WATER_REQUIRES_DROWN_PROTECTION -> SkipReason.WATER_REQUIRES_DROWN_PROTECTION;
+            case LAVA -> SkipReason.LAVA;
+            default -> SkipReason.NO_SAFE_POSITION;
+        };
+    }
+
+    private static SkipReason skipReasonForStart(RescueSessionManager.DistressStartResult result) {
+        return switch (result) {
+            case MISSING_REQUIRED_ITEM -> SkipReason.MISSING_REQUIRED_WEAPON;
+            case SOURCE_TASK_MISSING -> SkipReason.SOURCE_TASK_MISSING;
+            case SITTING_RELEASE_FAILED -> SkipReason.SITTING_RELEASE_FAILED;
+            case TASK_SWITCH_REJECTED -> SkipReason.TASK_SWITCH_REJECTED;
+            case TASK_SWITCH_ERROR -> SkipReason.TASK_SWITCH_ERROR;
+            default -> SkipReason.TASK_SWITCH_FAILED;
+        };
+    }
+
+    private static SkipReason skipReasonForLoad(MaidChunkLoadService.LoadFailure failure) {
+        if (failure == null) {
+            return SkipReason.NOT_LOADED;
+        }
+        return switch (failure) {
+            case DIMENSION_MISSING -> SkipReason.DIMENSION_MISSING;
+            case CHUNK_LOAD_FAILED -> SkipReason.CHUNK_LOAD_FAILED;
+            case MAID_NOT_FOUND -> SkipReason.MAID_NOT_FOUND;
+        };
+    }
+
     private enum SkipReason {
         NOT_LOADED("message.tlm_beyond_space.signal_skip.not_loaded"),
+        DIMENSION_MISSING("message.tlm_beyond_space.signal_skip.dimension_missing"),
+        CHUNK_LOAD_FAILED("message.tlm_beyond_space.signal_skip.chunk_load_failed"),
+        MAID_NOT_FOUND("message.tlm_beyond_space.signal_skip.maid_not_found"),
+        STORED_IN_SOUL_SPELL("message.tlm_beyond_space.signal_skip.stored_in_soul_spell"),
+        CHUNK_LOADING_DISABLED("message.tlm_beyond_space.signal_skip.chunk_loading_disabled"),
         NOT_OWNER("message.tlm_beyond_space.signal_skip.not_owner"),
         ACTIVE_SESSION("message.tlm_beyond_space.signal_skip.active_session"),
+        RETURN_PENDING("message.tlm_beyond_space.signal_skip.return_pending"),
         SELF_PRESERVING("message.tlm_beyond_space.signal_skip.self_preserving"),
         INVALID_TASK("message.tlm_beyond_space.signal_skip.invalid_task"),
         TASK_SWITCH_FAILED("message.tlm_beyond_space.signal_skip.task_switch_failed"),
+        MISSING_REQUIRED_WEAPON("message.tlm_beyond_space.signal_skip.missing_required_weapon"),
+        SOURCE_TASK_MISSING("message.tlm_beyond_space.signal_skip.source_task_missing"),
+        SITTING_RELEASE_FAILED("message.tlm_beyond_space.signal_skip.sitting_release_failed"),
+        TASK_SWITCH_REJECTED("message.tlm_beyond_space.signal_skip.task_switch_rejected"),
+        TASK_SWITCH_ERROR("message.tlm_beyond_space.signal_skip.task_switch_error"),
         NO_SAFE_POSITION("message.tlm_beyond_space.signal_skip.no_safe_position"),
+        WATER_REQUIRES_DROWN_PROTECTION(
+                "message.tlm_beyond_space.signal_skip.water_requires_drown_protection"),
+        LAVA("message.tlm_beyond_space.signal_skip.lava"),
+        MOUNTED_CROSS_DIMENSION("message.tlm_beyond_space.signal_skip.mounted_cross_dimension"),
         TELEPORT_FAILED("message.tlm_beyond_space.signal_skip.teleport_failed"),
         ENTITY_CREATE_FAILED("message.tlm_beyond_space.signal_skip.entity_create_failed"),
         ENTITY_VERIFY_FAILED("message.tlm_beyond_space.signal_skip.entity_verify_failed"),

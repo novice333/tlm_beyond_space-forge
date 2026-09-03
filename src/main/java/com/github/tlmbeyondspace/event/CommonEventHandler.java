@@ -1,13 +1,18 @@
 package com.github.tlmbeyondspace.event;
 
 import com.github.tartaricacid.touhoulittlemaid.api.event.MaidTickEvent;
+import com.github.tartaricacid.touhoulittlemaid.api.event.MaidAndItemTransformEvent;
 import com.github.tlmbeyondspace.compat.PromaidCompat;
 import com.github.tlmbeyondspace.service.DamageSignalService;
 import com.github.tlmbeyondspace.service.CombatMaidBookService;
 import com.github.tlmbeyondspace.service.DistressRecallService;
 import com.github.tlmbeyondspace.service.MaidRosterService;
+import com.github.tlmbeyondspace.service.MaidChunkLoadService;
+import com.github.tlmbeyondspace.service.MaidReformRescueService;
 import com.github.tlmbeyondspace.service.OwnerFollowTeleportService;
+import com.github.tlmbeyondspace.service.PendingMaidReturnService;
 import com.github.tlmbeyondspace.service.RescueSessionManager;
+import com.github.tlmbeyondspace.service.SoulSpellMaidService;
 import com.github.tlmbeyondspace.data.PendingBindingClearData;
 import com.github.tlmbeyondspace.data.PendingProfileResetData;
 import com.github.tlmbeyondspace.item.SpacetimeRescueCharmItem;
@@ -17,12 +22,14 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.event.TickEvent;
 
 public final class CommonEventHandler {
     public static final CommonEventHandler INSTANCE = new CommonEventHandler();
@@ -43,7 +50,26 @@ public final class CommonEventHandler {
     public void onEntityJoinLevel(EntityJoinLevelEvent event) {
         if (event.getEntity() instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid
                 && !event.getLevel().isClientSide) {
+            SoulSpellMaidService.clearStored(maid);
             MaidRosterService.observe(maid);
+        }
+    }
+
+    @SubscribeEvent
+    public void onMaidStoredAsItem(MaidAndItemTransformEvent.ToItem event) {
+        SoulSpellMaidService.markStored(event.getMaid());
+    }
+
+    @SubscribeEvent
+    public void onMaidRestoredFromItem(MaidAndItemTransformEvent.ToMaid event) {
+        SoulSpellMaidService.clearStored(event.getMaid());
+    }
+
+    @SubscribeEvent
+    public void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
+        if (event.getEntity() instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid
+                && !event.getLevel().isClientSide) {
+            MaidRosterService.observeImmediately(maid);
         }
     }
 
@@ -85,6 +111,21 @@ public final class CommonEventHandler {
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             DistressRecallService.recallForOwnerQuiet(player);
+            MaidReformRescueService.removePlayer(player.getUUID());
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerTick(TickEvent.PlayerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END && event.player instanceof ServerPlayer player) {
+            MaidReformRescueService.tick(player);
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            DamageSignalService.clearVictim(player.getUUID());
         }
     }
 
@@ -98,11 +139,18 @@ public final class CommonEventHandler {
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public void onLivingDeath(LivingDeathEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            if (PromaidCompat.shouldHandoffOwnerDeath()) {
-                DistressRecallService.releaseForOwnerDeath(player);
-            } else {
-                DistressRecallService.recallForOwnerQuiet(player);
-            }
+            // The fatal hit must not start a fresh REGULAR rescue while another mod is moving maids
+            // between the death point and the respawn point.
+            DamageSignalService.clearVictim(player.getUUID());
+            DistressRecallService.recallForOwnerDeath(player);
+        }
+    }
+
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            MaidChunkLoadService.tick(event.getServer());
+            PendingMaidReturnService.tick(event.getServer());
         }
     }
 
@@ -116,6 +164,9 @@ public final class CommonEventHandler {
         DamageSignalService.clearAll();
         MaidRosterService.clearCaches();
         RescueSessionManager.INSTANCE.clearCaches();
+        PendingMaidReturnService.clear();
+        MaidChunkLoadService.clear();
+        MaidReformRescueService.clear();
     }
 
     private CommonEventHandler() {

@@ -19,15 +19,22 @@ public final class DistressSignalData {
     private final UUID ownerId;
     private final Map<UUID, Selection> selections;
     private final boolean recallMode;
+    private final boolean knockdownRescue;
 
     public DistressSignalData(UUID ownerId, Map<UUID, Selection> selections) {
-        this(ownerId, selections, false);
+        this(ownerId, selections, false, false);
     }
 
     public DistressSignalData(UUID ownerId, Map<UUID, Selection> selections, boolean recallMode) {
+        this(ownerId, selections, recallMode, false);
+    }
+
+    public DistressSignalData(UUID ownerId, Map<UUID, Selection> selections, boolean recallMode,
+                              boolean knockdownRescue) {
         this.ownerId = ownerId;
         this.selections = new LinkedHashMap<>(selections);
         this.recallMode = recallMode;
+        this.knockdownRescue = knockdownRescue;
     }
 
     public static DistressSignalData empty() {
@@ -54,6 +61,10 @@ public final class DistressSignalData {
         return recallMode;
     }
 
+    public boolean knockdownRescue() {
+        return knockdownRescue;
+    }
+
     public CompoundTag save() {
         CompoundTag root = new CompoundTag();
         if (ownerId != null) root.putUUID("Owner", ownerId);
@@ -62,11 +73,13 @@ public final class DistressSignalData {
             CompoundTag entry = new CompoundTag();
             entry.putUUID("Maid", maidId);
             entry.putBoolean("Enabled", selection.enabled());
+            entry.putBoolean("LoadUnloaded", selection.loadUnloaded());
             entry.putString("CombatTask", selection.combatTask().toString());
             list.add(entry);
         });
         root.put("Selections", list);
         root.putBoolean("RecallMode", recallMode);
+        root.putBoolean("KnockdownRescue", knockdownRescue);
         return root;
     }
 
@@ -79,9 +92,14 @@ public final class DistressSignalData {
             if (!entry.hasUUID("Maid")) continue;
             ResourceLocation task = ResourceLocation.tryParse(entry.getString("CombatTask"));
             if (task == null) task = TaskAttack.UID;
-            selections.put(entry.getUUID("Maid"), new Selection(entry.getBoolean("Enabled"), task));
+            boolean enabled = entry.getBoolean("Enabled");
+            // Signals saved before this option existed always attempted a bounded chunk load.
+            boolean loadUnloaded = !entry.contains("LoadUnloaded", Tag.TAG_BYTE)
+                    || entry.getBoolean("LoadUnloaded");
+            selections.put(entry.getUUID("Maid"), new Selection(enabled, loadUnloaded, task));
         }
-        return new DistressSignalData(owner, selections, root.getBoolean("RecallMode"));
+        return new DistressSignalData(owner, selections, root.getBoolean("RecallMode"),
+                root.getBoolean("KnockdownRescue"));
     }
 
     public static DistressSignalData fromItem(ItemStack stack) {
@@ -94,6 +112,9 @@ public final class DistressSignalData {
         stack.getOrCreateTag().put(ITEM_TAG, data.save());
     }
 
-    public record Selection(boolean enabled, ResourceLocation combatTask) {
+    public record Selection(boolean enabled, boolean loadUnloaded, ResourceLocation combatTask) {
+        public Selection(boolean enabled, ResourceLocation combatTask) {
+            this(enabled, true, combatTask);
+        }
     }
 }

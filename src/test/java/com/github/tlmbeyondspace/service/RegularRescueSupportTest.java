@@ -12,20 +12,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RegularRescueSupportTest {
     @Test
-    void onlyRegularBondFollowModeSkipsOriginReturn() {
+    void regularFollowModeSkipsOriginReturnRegardlessOfRescueModeOrDistance() {
         assertTrue(RegularRescueSupport.shouldStayNearOwnerAfterRescue(
-                session(RescueSessionKind.REGULAR, RescueMode.BOND, false)));
+                session(RescueSessionKind.REGULAR, RescueMode.BOND, false, false)));
         assertFalse(RegularRescueSupport.shouldStayNearOwnerAfterRescue(
-                session(RescueSessionKind.REGULAR, RescueMode.BOND, true)));
+                session(RescueSessionKind.REGULAR, RescueMode.BOND, true, false)));
+        assertTrue(RegularRescueSupport.shouldStayNearOwnerAfterRescue(
+                session(RescueSessionKind.REGULAR, RescueMode.SOLO, false, false)));
         assertFalse(RegularRescueSupport.shouldStayNearOwnerAfterRescue(
-                session(RescueSessionKind.REGULAR, RescueMode.SOLO, false)));
+                session(RescueSessionKind.DISTRESS, RescueMode.BOND, false, false)));
         assertFalse(RegularRescueSupport.shouldStayNearOwnerAfterRescue(
-                session(RescueSessionKind.DISTRESS, RescueMode.BOND, false)));
+                session(RescueSessionKind.REGULAR, RescueMode.BOND, false, true)));
     }
 
     private static MaidRescueSessionData.Data session(RescueSessionKind kind, RescueMode mode,
-                                                      boolean sourceHomeMode) {
+                                                      boolean sourceHomeMode, boolean sourceSitting) {
         return new MaidRescueSessionData.Data(true, kind, null, null, null, Vec3.ZERO,
-                sourceHomeMode, MaidSchedule.ALL, 0, 0, mode);
+                sourceHomeMode, MaidSchedule.ALL, 0, 0, mode, true, sourceSitting,
+                false);
     }
 }

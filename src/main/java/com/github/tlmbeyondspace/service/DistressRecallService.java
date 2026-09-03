@@ -48,10 +48,25 @@ public final class DistressRecallService {
         recallForOwner(player, false);
     }
 
-    /** 只释放本模组的临时状态，把最终死亡传送交给 Promaid。 */
-    public static void releaseForOwnerDeath(ServerPlayer player) {
+    /** Return all active rescue maids before the owner respawns. */
+    public static void recallForOwnerDeath(ServerPlayer player) {
         for (EntityMaid maid : findActiveRescueMaids(player)) {
-            DistressCrossDimSupport.restoreWithoutReturn(maid, MaidRescueSessionData.get(maid));
+            MaidRescueSessionData.Data session = MaidRescueSessionData.get(maid);
+            boolean returned = false;
+            try {
+                returned = DistressCrossDimSupport.finishAndReturn(maid, session);
+            } catch (Exception | LinkageError ignored) {
+                // Owner death must remain safe even when an optional mod changes entity behavior.
+            }
+            if (!returned) {
+                try {
+                    DistressCrossDimSupport.restoreForPendingReturn(maid, session);
+                } catch (Exception | LinkageError ignored) {
+                }
+            }
+            if (!returned) {
+                PendingMaidReturnService.defer(player.server, maid, session);
+            }
         }
     }
 

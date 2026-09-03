@@ -29,11 +29,16 @@ public final class RegularRescueSupport {
                 return false;
             }
 
+            boolean sourceSitting = maid.isMaidInSittingPose();
             session = new MaidRescueSessionData.Data(true,
                     RescueSessionKind.REGULAR, sourceTask.getUid(), attackTask.getUid(),
                     maid.level().dimension().location(), maid.position(), maid.isHomeModeEnable(),
-                    maid.getSchedule(), maid.level().getGameTime(), 0, mode);
+                    maid.getSchedule(), maid.level().getGameTime(), 0, mode,
+                    true, sourceSitting, false);
             MaidRescueSessionData.set(maid, session);
+            if (sourceSitting) {
+                maid.setInSittingPose(false);
+            }
             WeaponCaseSwapService.beginSwap(maid, attackTask);
 
             if (!TaskSwitchService.prepareAndSwitch(maid, attackTask)) {
@@ -68,11 +73,17 @@ public final class RegularRescueSupport {
             TlmBeyondSpace.LOGGER.warn("Could not roll back weapon swap for maid {}", maid.getUUID(), error);
         }
         TaskSwitchService.restore(maid, session, true);
+        DistressCrossDimSupport.restoreSourceSitting(maid, session);
         MaidRescueSessionData.clear(maid);
         manager.applyFailureCooldown(maid);
     }
 
     private static boolean summonToOwnerIfNeeded(EntityMaid maid) {
+        // Automatic rescue may change combat task/target while mounted, but must never pull the
+        // maid off a broom. Manual distress-signal transport intentionally keeps its old behavior.
+        if (maid.isPassenger()) {
+            return true;
+        }
         LivingEntity owner = maid.getOwner();
         if (owner == null || !owner.isAlive() || owner.level() != maid.level()) {
             return true;
@@ -85,8 +96,12 @@ public final class RegularRescueSupport {
 
     static boolean shouldStayNearOwnerAfterRescue(MaidRescueSessionData.Data session) {
         return session.kind() == RescueSessionKind.REGULAR
-                && session.triggerMode() == RescueMode.BOND
-                && !session.sourceHomeMode();
+                && !session.sourceHomeMode()
+                && (!session.sittingCaptured() || !session.sourceSitting());
+    }
+
+    static boolean shouldSkipAutomaticReturnTeleport(EntityMaid maid) {
+        return maid.isPassenger();
     }
 
     private RegularRescueSupport() {

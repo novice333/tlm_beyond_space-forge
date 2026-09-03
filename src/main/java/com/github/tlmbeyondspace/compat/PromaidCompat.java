@@ -5,30 +5,45 @@ import com.github.tlmbeyondspace.TlmBeyondSpace;
 import com.github.tlmbeyondspace.config.BeyondSpaceCommonConfig;
 import net.minecraftforge.common.ForgeConfigSpec;
 import net.minecraftforge.fml.ModList;
+import net.minecraft.resources.ResourceLocation;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.Optional;
 
 /** Promaid 的可选软兼容入口；类路径中没有 Promaid 时不会加载其任何类。 */
 public final class PromaidCompat {
     private static final String MOD_ID = "promaid";
     private static final String CONFIG_CLASS = "com.maidsmart.config.MaidSmartConfig";
+    private static final String SCHEDULE_GUARD_CLASS = "com.maidsmart.schedule.ScheduleSwitchGuard";
     private static final String SELF_PRESERVING_TAG = "maid_smart_preserving";
+    private static volatile boolean scheduleGuardResolved;
+    private static volatile Method scheduleGuardMethod;
 
     public static void applyStartupCompatibility() {
-        if (!BeyondSpaceCommonConfig.PROMAID_AUTO_DISABLE_DIMENSION_FOLLOW.get() || !isLoaded()) {
+        if (!isLoaded()) {
             return;
         }
-        Optional<ForgeConfigSpec.ConfigValue<Boolean>> value = booleanConfigValue("MISC_DIMENSION_FOLLOW");
+        if (BeyondSpaceCommonConfig.PROMAID_AUTO_DISABLE_DIMENSION_FOLLOW.get()) {
+            disableBooleanInMemory("MISC_DIMENSION_FOLLOW", "dimension follow");
+        }
+        if (BeyondSpaceCommonConfig.PROMAID_AUTO_DISABLE_OWNER_DEATH_TELEPORT.get()) {
+            disableBooleanInMemory("COMBAT_MASTER_DEATH_TELEPORT", "owner-death maid teleport");
+        }
+    }
+
+    private static void disableBooleanInMemory(String fieldName, String description) {
+        Optional<ForgeConfigSpec.ConfigValue<Boolean>> value = booleanConfigValue(fieldName);
         if (value.isEmpty()) {
-            TlmBeyondSpace.LOGGER.warn("Promaid is installed, but its dimension-follow config was not found; "
-                    + "Beyond Space will continue without changing it");
+            TlmBeyondSpace.LOGGER.warn("Promaid is installed, but its {} config was not found; "
+                    + "Beyond Space will continue without changing it", description);
             return;
         }
         if (Boolean.TRUE.equals(value.get().get())) {
             // 只改本次运行的内存值，不主动调用 Promaid 的 save()。
             value.get().set(false);
-            TlmBeyondSpace.LOGGER.info("Disabled Promaid dimension follow in memory for this server run");
+            TlmBeyondSpace.LOGGER.info("Disabled Promaid {} in memory for this server run", description);
         }
     }
 
@@ -39,14 +54,59 @@ public final class PromaidCompat {
                 maid.getPersistentData().getBoolean(SELF_PRESERVING_TAG));
     }
 
-    public static boolean shouldHandoffOwnerDeath() {
-        if (!BeyondSpaceCommonConfig.PROMAID_OWNER_DEATH_HANDOFF.get() || !isLoaded()) {
-            return false;
+    /**
+     * Promaid 1.1+ may guard setTask/setSchedule while its scheduler is enabled. Run through its
+     * public guard when available; older Promaid versions and absent Promaid use the action directly.
+     */
+    public static void runTaskScheduleChange(EntityMaid maid, ResourceLocation targetTask, Runnable action) {
+        if (!isLoaded()) {
+            action.run();
+            return;
         }
-        return booleanConfigValue("COMBAT_MASTER_DEATH_TELEPORT")
-                .map(ForgeConfigSpec.ConfigValue::get)
-                .map(Boolean.TRUE::equals)
-                .orElse(false);
+        Method method = resolveScheduleGuard();
+        if (method == null) {
+            action.run();
+            return;
+        }
+        try {
+            method.invoke(null, maid.getUUID(), targetTask, action);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error fatal) {
+                throw fatal;
+            }
+            throw new IllegalStateException("Promaid guarded task change failed", cause);
+        } catch (IllegalAccessException | LinkageError unavailable) {
+            TlmBeyondSpace.LOGGER.warn("Promaid schedule guard could not be invoked; using normal task change",
+                    unavailable);
+            action.run();
+        }
+    }
+
+    private static Method resolveScheduleGuard() {
+        if (scheduleGuardResolved) {
+            return scheduleGuardMethod;
+        }
+        synchronized (PromaidCompat.class) {
+            if (scheduleGuardResolved) {
+                return scheduleGuardMethod;
+            }
+            try {
+                Class<?> guard = Class.forName(SCHEDULE_GUARD_CLASS, false,
+                        PromaidCompat.class.getClassLoader());
+                scheduleGuardMethod = guard.getMethod("runInternal", java.util.UUID.class,
+                        ResourceLocation.class, Runnable.class);
+            } catch (ReflectiveOperationException | LinkageError unavailable) {
+                TlmBeyondSpace.LOGGER.debug(
+                        "Promaid schedule guard is unavailable; using normal task changes", unavailable);
+            } finally {
+                scheduleGuardResolved = true;
+            }
+            return scheduleGuardMethod;
+        }
     }
 
     static boolean shouldPrioritizeSelfPreservation(boolean compatibilityEnabled,
@@ -55,7 +115,7 @@ public final class PromaidCompat {
         return compatibilityEnabled && promaidLoaded && selfPreserving;
     }
 
-    private static boolean isLoaded() {
+    public static boolean isLoaded() {
         return ModList.get().isLoaded(MOD_ID);
     }
 

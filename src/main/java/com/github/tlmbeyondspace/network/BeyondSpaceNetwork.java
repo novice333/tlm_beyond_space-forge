@@ -12,7 +12,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class BeyondSpaceNetwork {
-    private static final String PROTOCOL = "5";
+    private static final String PROTOCOL = "9";
     public static final SimpleChannel CHANNEL = NetworkRegistry.ChannelBuilder
             .named(new ResourceLocation(TlmBeyondSpace.MOD_ID, "main"))
             .networkProtocolVersion(() -> PROTOCOL)
