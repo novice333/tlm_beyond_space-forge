@@ -91,7 +91,6 @@ public final class DistressCrossDimSupport {
         ServerLevel destinationLevel = player.serverLevel();
         MinecraftServer server = player.server;
         int successCount = 0;
-        int recoveredCount = 0;
         List<SkipEntry> failures = new ArrayList<>();
 
         for (int selectionIndex = 0;
@@ -119,28 +118,13 @@ public final class DistressCrossDimSupport {
             }
             MaidRescueSessionData.Data existingSession = MaidRescueSessionData.get(oldMaid);
             if (existingSession.returnPending()) {
-                if (finishAndReturn(oldMaid, existingSession)) {
-                    recoveredCount++;
-                    player.displayClientMessage(Component.translatable(
-                            "message.tlm_beyond_space.signal_recovered_origin", maidName), false);
-                } else {
-                    failures.add(new SkipEntry(maidName, SkipReason.RETURN_PENDING));
-                }
+                // Normal summon mode must never double as recall. Only DistressSignalItem's
+                // dedicated recall-mode branch is allowed to return an existing rescue session.
+                failures.add(new SkipEntry(maidName, SkipReason.RETURN_PENDING));
                 continue;
             }
             if (existingSession.active()) {
                 if (RescueSessionManager.INSTANCE.isLiveRescueSession(oldMaid, existingSession)) {
-                    if (existingSession.kind() == RescueSessionKind.DISTRESS) {
-                        if (finishAndReturn(oldMaid, existingSession)) {
-                            recoveredCount++;
-                            player.displayClientMessage(Component.translatable(
-                                    "message.tlm_beyond_space.signal_recovered_origin", maidName), false);
-                        } else {
-                            restoreForPendingReturn(oldMaid, existingSession);
-                            failures.add(new SkipEntry(maidName, SkipReason.RETURN_PENDING));
-                        }
-                        continue;
-                    }
                     failures.add(new SkipEntry(maidName, SkipReason.ACTIVE_SESSION));
                     continue;
                 }
@@ -215,7 +199,7 @@ public final class DistressCrossDimSupport {
         if (successCount > 0) {
             player.getCooldowns().addCooldown(signalItem, BeyondSpaceCommonConfig.SIGNAL_COOLDOWN_TICKS.get());
         }
-        if (successCount > 0 || !failures.isEmpty() || recoveredCount == 0) {
+        if (successCount > 0 || !failures.isEmpty()) {
             player.displayClientMessage(Component.translatable("message.tlm_beyond_space.signal_result",
                     successCount, failures.size()), true);
         }
@@ -639,6 +623,7 @@ public final class DistressCrossDimSupport {
             case DIMENSION_MISSING -> SkipReason.DIMENSION_MISSING;
             case CHUNK_LOAD_FAILED -> SkipReason.CHUNK_LOAD_FAILED;
             case MAID_NOT_FOUND -> SkipReason.MAID_NOT_FOUND;
+            case LOCATION_UNKNOWN -> SkipReason.LOCATION_UNKNOWN;
         };
     }
 
@@ -647,6 +632,7 @@ public final class DistressCrossDimSupport {
         DIMENSION_MISSING("message.tlm_beyond_space.signal_skip.dimension_missing"),
         CHUNK_LOAD_FAILED("message.tlm_beyond_space.signal_skip.chunk_load_failed"),
         MAID_NOT_FOUND("message.tlm_beyond_space.signal_skip.maid_not_found"),
+        LOCATION_UNKNOWN("message.tlm_beyond_space.signal_skip.location_unknown"),
         STORED_IN_SOUL_SPELL("message.tlm_beyond_space.signal_skip.stored_in_soul_spell"),
         CHUNK_LOADING_DISABLED("message.tlm_beyond_space.signal_skip.chunk_loading_disabled"),
         NOT_OWNER("message.tlm_beyond_space.signal_skip.not_owner"),

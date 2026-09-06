@@ -23,19 +23,27 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /** Loads at most two recorded maid chunks concurrently and never reconstructs an entity from NBT. */
 public final class MaidChunkLoadService {
     private static final int MAX_CONCURRENT_CHUNKS = 2;
-    private static final int REQUEST_TIMEOUT_TICKS = 300;
-    private static final int ENTITY_RESOLVE_DELAY_TICKS = 2;
-    private static final int ENTITY_RESOLVE_TIMEOUT_TICKS = 100;
+    private static final int MAX_SELECTED_MAIDS_TO_SCAN = 20;
+    /** Allows a full 20-chunk request to make progress even when several entity loads are slow. */
+    private static final int REQUEST_TIMEOUT_TICKS = 7_200;
+    /** FULL chunk completion precedes entity registration; give TLM half a second before polling. */
+    private static final int ENTITY_RESOLVE_DELAY_TICKS = 10;
+    /** Some mod-heavy worlds register saved entities several seconds after the chunk reaches FULL. */
+    private static final int ENTITY_RESOLVE_TIMEOUT_TICKS = 600;
+    /** A newly written TLM offline record may become visible a few ticks after the entity unloads. */
+    private static final int LOCATION_RESOLVE_TIMEOUT_TICKS = 100;
     private static final TicketType<UUID> TICKET = TicketType.create("tlm_beyond_space_rescue",
-            Comparator.comparing(UUID::toString), 440);
+            Comparator.comparing(UUID::toString), 1_200);
     private static final Deque<Request> REQUESTS = new ArrayDeque<>();
     private static final List<ActiveChunk> ACTIVE = new ArrayList<>();
     private static final Map<UUID, Request> BY_PLAYER = new HashMap<>();
@@ -50,10 +58,18 @@ public final class MaidChunkLoadService {
         }
         SoulSpellMaidService.refreshKnownItems(player);
         LinkedHashMap<ChunkKey, List<UUID>> chunks = new LinkedHashMap<>();
-        int considered = 0;
+        Set<UUID> unresolvedLocations = new LinkedHashSet<>();
+        int scannedSelections = 0;
         for (Map.Entry<UUID, DistressSignalData.Selection> selection : data.selections().entrySet()) {
             if (!selection.getValue().enabled()) {
                 continue;
+            }
+            // helperLimit limits successful responders, not how far down the ordered roster we
+            // search. Earlier entries may already be assisting or otherwise unable to respond;
+            // stopping after helperLimit entries made later unloaded maids miss preloading and
+            // appear as "currently not loaded" on the first use.
+            if (scannedSelections++ >= MAX_SELECTED_MAIDS_TO_SCAN) {
+                break;
             }
             UUID maidId = selection.getKey();
             boolean loaded = MaidRosterService.findLoadedMaid(player.server, maidId).isPresent();
@@ -61,14 +77,12 @@ public final class MaidChunkLoadService {
                     || SoulSpellMaidService.isStored(player, maidId))) {
                 continue;
             }
-            if (considered++ >= Math.min(helperLimit, 20)) {
-                break;
-            }
             if (loaded) {
                 continue;
             }
             LastKnownMaidData.Entry known = MaidRosterService.lastKnown(player, maidId).orElse(null);
             if (known == null || known.dimension() == null || known.dimension().isBlank()) {
+                unresolvedLocations.add(maidId);
                 continue;
             }
             int chunkX = known.position().getX() >> 4;
@@ -76,15 +90,21 @@ public final class MaidChunkLoadService {
             chunks.computeIfAbsent(new ChunkKey(known.dimension(), chunkX, chunkZ), ignored -> new ArrayList<>())
                     .add(maidId);
         }
-        if (chunks.isEmpty()) {
+        if (chunks.isEmpty() && unresolvedLocations.isEmpty()) {
             return false;
         }
+        long now = player.server.getTickCount();
         Request request = new Request(UUID.randomUUID(), player.getUUID(), signalItem, data, helperLimit, kind,
-                player.server.getTickCount() + REQUEST_TIMEOUT_TICKS, new ArrayDeque<>(chunks.entrySet()));
+                now + REQUEST_TIMEOUT_TICKS, now + LOCATION_RESOLVE_TIMEOUT_TICKS,
+                new ArrayDeque<>(chunks.entrySet()), unresolvedLocations);
         REQUESTS.add(request);
         BY_PLAYER.put(player.getUUID(), request);
+        int queuedMaidCount = chunks.values().stream().mapToInt(List::size).sum()
+                + unresolvedLocations.size();
         player.displayClientMessage(Component.translatable("message.tlm_beyond_space.chunk_load.started",
-                chunks.size()), true);
+                queuedMaidCount), true);
+        TlmBeyondSpace.LOGGER.info("Queued maid recovery for player {}: {} chunk(s), {} location(s) pending",
+                player.getUUID(), chunks.size(), unresolvedLocations.size());
         return true;
     }
 
@@ -144,12 +164,17 @@ public final class MaidChunkLoadService {
         Iterator<Request> requestIterator = REQUESTS.iterator();
         while (requestIterator.hasNext()) {
             Request request = requestIterator.next();
+            resolvePendingLocations(server, request, now);
             if (now >= request.expiresAt) {
                 request.pending.forEach(entry -> entry.getValue().forEach(
                         maidId -> request.failures.put(maidId, LoadFailure.CHUNK_LOAD_FAILED)));
                 request.pending.clear();
+                request.unresolvedLocations.forEach(
+                        maidId -> request.failures.put(maidId, LoadFailure.LOCATION_UNKNOWN));
+                request.unresolvedLocations.clear();
             }
-            if (request.pending.isEmpty() && request.activeChunks == 0) {
+            if (request.pending.isEmpty() && request.unresolvedLocations.isEmpty()
+                    && request.activeChunks == 0) {
                 finish(server, request);
                 requestIterator.remove();
             }
@@ -185,6 +210,36 @@ public final class MaidChunkLoadService {
             } catch (Exception | LinkageError ignored) {
             }
         }
+    }
+
+    private static void resolvePendingLocations(MinecraftServer server, Request request, long now) {
+        if (request.unresolvedLocations.isEmpty()) {
+            return;
+        }
+        ServerPlayer player = server.getPlayerList().getPlayer(request.playerId);
+        if (player == null) {
+            return;
+        }
+        Map<ChunkKey, List<UUID>> discovered = new LinkedHashMap<>();
+        Iterator<UUID> iterator = request.unresolvedLocations.iterator();
+        while (iterator.hasNext()) {
+            UUID maidId = iterator.next();
+            if (MaidRosterService.findLoadedMaid(server, maidId).isPresent()) {
+                iterator.remove();
+                continue;
+            }
+            LastKnownMaidData.Entry known = MaidRosterService.lastKnown(player, maidId).orElse(null);
+            if (known != null && known.dimension() != null && !known.dimension().isBlank()) {
+                ChunkKey key = new ChunkKey(known.dimension(), known.position().getX() >> 4,
+                        known.position().getZ() >> 4);
+                discovered.computeIfAbsent(key, ignored -> new ArrayList<>()).add(maidId);
+                iterator.remove();
+            } else if (now >= request.locationResolveDeadline) {
+                request.failures.put(maidId, LoadFailure.LOCATION_UNKNOWN);
+                iterator.remove();
+            }
+        }
+        discovered.entrySet().forEach(request.pending::addLast);
     }
 
     private static void completeChunk(ActiveChunk active, LoadFailure failure) {
@@ -240,7 +295,8 @@ public final class MaidChunkLoadService {
     public enum LoadFailure {
         DIMENSION_MISSING,
         CHUNK_LOAD_FAILED,
-        MAID_NOT_FOUND
+        MAID_NOT_FOUND,
+        LOCATION_UNKNOWN
     }
 
     private record ChunkKey(String dimension, int chunkX, int chunkZ) {
@@ -254,13 +310,15 @@ public final class MaidChunkLoadService {
         private final int helperLimit;
         private final ActivationKind kind;
         private final long expiresAt;
+        private final long locationResolveDeadline;
         private final Deque<Map.Entry<ChunkKey, List<UUID>>> pending;
+        private final Set<UUID> unresolvedLocations;
         private final Map<UUID, LoadFailure> failures = new HashMap<>();
         private int activeChunks;
 
         private Request(UUID id, UUID playerId, Item signalItem, DistressSignalData data, int helperLimit,
-                        ActivationKind kind, long expiresAt,
-                        Deque<Map.Entry<ChunkKey, List<UUID>>> pending) {
+                        ActivationKind kind, long expiresAt, long locationResolveDeadline,
+                        Deque<Map.Entry<ChunkKey, List<UUID>>> pending, Set<UUID> unresolvedLocations) {
             this.id = id;
             this.playerId = playerId;
             this.signalItem = signalItem;
@@ -268,7 +326,9 @@ public final class MaidChunkLoadService {
             this.helperLimit = helperLimit;
             this.kind = kind;
             this.expiresAt = expiresAt;
+            this.locationResolveDeadline = locationResolveDeadline;
             this.pending = pending;
+            this.unresolvedLocations = new LinkedHashSet<>(unresolvedLocations);
         }
     }
 

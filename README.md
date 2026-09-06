@@ -2,7 +2,7 @@
 
 车万女仆（Touhou Little Maid）的附属模组：超时空救援。
 
-当前版本：`1.1.0`（新迭代基线，网络协议 9）
+当前版本：`1.1.1`（1.1 新迭代，网络协议 9）
 
 - Minecraft 1.20.1
 - Forge 47.x
@@ -13,7 +13,7 @@
 
 将 `build/libs/` 中的：
 
-`tlm_beyond_space-forge-1.1.0.jar`
+`tlm_beyond_space-forge-1.1.1.jar`
 
 放入对应整合包的 `mods` 文件夹。
 
